@@ -16,7 +16,7 @@ from tests.conftest import get_dispatch_core_type, get_dispatch_core_axis, get_d
 from tests.utils import assert_with_pcc, comp_pcc, construct_pcc_assert_message
 from torch.fx.node import Node, map_arg
 from torch_ttnn.utils import get_opname, users_have_getitem, is_operation, get_node_name
-from typing import Dict, List
+from typing import NamedTuple
 
 wrapper_funcs = set()
 rename_wrappers = set()
@@ -733,17 +733,16 @@ def _assemble_forward_functions(aten_fx_graphs, ttnn_fx_graphs, inputs, torch_tt
     return forward_code, call_forwards_in_main
 
 
-class TangentsInfo:
-    def __init__(self, chunk_idx, graph_idx, tangents):
-        self.chunk_idx = chunk_idx
-        self.graph_idx = graph_idx
-        self.tangents = tangents
+class TangentsInfo(NamedTuple):
+    # Organize the list of tangents and from which graph they originated
+    chunk_idx: int
+    graph_idx: int
+    tangents: list
 
 
 def _collect_tangents(aten_fx_graphs):
     """
-    Collects lists of tangents
-    Tangents are the "direction" of a primal (input).
+    Collects lists of tangents.
 
     Args:
         aten_fx_graphs: List of aten graphs
@@ -754,29 +753,31 @@ def _collect_tangents(aten_fx_graphs):
 
     for chunk_idx, aten_fx_graphs_chunk in enumerate(aten_fx_graphs):
         for graph_idx, aten_graph in enumerate(aten_fx_graphs_chunk):
-            # for every output in each graph, locate the nodes marked as
-            # tangents. Save them in the respective order.
+            # For every output in each graph, locate the nodes marked as tangents.
+            # Save them in the respective order along with graph id information.
             output_node = list(aten_graph.nodes)[-1]
             assert output_node.op == "output"
             outputs = output_node.args[0]
             tangents_list = []
             first_primal_idx = 0
-            # Pytorch organizes tangents as nodes before the first primal node
-            # However, within this subset, not all are tangents.
+            # If there are no primal nodes, there are also no tangents.
+            # Otherwise, Pytorch organizes tangents nodes before the first primal node.
+            # However, within this subset, not all are tangents. During compilation, the tangent
+            # nodes would have been marked accordingly.
             for i, out_arg in enumerate(outputs):
                 if get_node_name(out_arg).startswith("primals"):
                     first_primal_idx = i
                     break
             if first_primal_idx > 0:
                 for i, outp in enumerate(outputs):
+                    # End loop early once all tangents are processed
                     if i == first_primal_idx:
                         break
-                    if outp is not None and (tan := outp.meta.get("tangents", None) is not None):
+                    assert outp is not None, "Proposed tangent cannot be None"
+                    if tan := outp.meta.get("tangents", None) is not None:
                         if tan:
-                            outp_name = get_node_name(outp)
-                            tangents_list.append(outp_name)
+                            tangents_list.append(get_node_name(outp))
                 tangents_info.append(TangentsInfo(chunk_idx, graph_idx, tangents_list))
-                print("tangents:", chunk_idx, graph_idx, tangents_list)
 
     return tangents_info
 
